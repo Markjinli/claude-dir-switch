@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Claude Code 全家桶 — Mac 一键安装脚本
-#  v4: 方框固定头部 + 原生下载进度条 + 错误重试
+#  v5: 方框固定头部 + 原生下载进度条 + 错误重试
 # ============================================================
 set -euo pipefail
+
+# ══ 关键：重新把 stdin 连到终端，否则 brew/curl 会抑制进度条 ══
+# 本脚本通常以 bash <(curl ...) 运行，stdin 是管道而非 TTY。
+# brew/curl 检测到非 TTY 环境就会关闭交互式进度条。
+exec 0</dev/tty
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BLUE='\033[0;34m'; MAGENTA='\033[0;35m'
@@ -13,11 +18,10 @@ START_TIME=$(date +%s)
 LOG_FILE="/tmp/claude-tools-install-$$.log"
 SCROLL_LINES=()
 CURRENT_STEP=0; TOTAL_STEPS=5; CURRENT_LABEL=""
-HEADER_LINES=12  # 头部占用行数（含边框）
+HEADER_LINES=12
 
 # ── 终端控制 ──
 term_rows() { tput lines 2>/dev/null || echo 40; }
-term_cols() { tput cols 2>/dev/null || echo 80; }
 hide_cursor(){ printf '\033[?25l'; }
 show_cursor(){ printf '\033[?25h'; }
 
@@ -32,31 +36,47 @@ warn() { add_log "⚠" "$1"; }
 err()  { add_log "✗" "$1"; }
 info() { add_log "→" "$1"; }
 
-# ── 绘制带方框的固定头部 ──
+# ── 恢复全终端滚动（长命令前调用）──
+release_scroll() {
+    tput csr 0 "$(term_rows)" 2>/dev/null || true
+    # 光标移到屏幕底部
+    printf '\033[%d;0H' "$(term_rows)"
+}
+
+# ── 锁定滚动区域（长命令后调用）──
+lock_scroll() {
+    tput csr "$HEADER_LINES" "$(term_rows)" 2>/dev/null || true
+}
+
+# ── 执行需要显示原生进度条的命令 ──
+run_cmd() {
+    local desc="$1"; shift
+    info "${desc}..."
+    release_scroll
+    # stdin 连到 TTY，brew/curl 原生进度条正常显示
+    "$@" </dev/tty
+    local rc=$?
+    lock_scroll
+    return $rc
+}
+
+# ── 绘制固定头部方框 ──
 draw_header() {
     local step=$1 total=$2 label="$3"
     local elapsed=$(($(date +%s) - START_TIME))
+    local TW=46
 
-    # 暂时取消滚动限制以便画头部
-    tput csr 0 "$(term_rows)" 2>/dev/null || true
+    release_scroll
     printf '\033[H'
 
-    local TW=46  # 框内宽度
-
-    # 顶部边框
     printf "  ${CYAN}${BOLD}╔%s╗${NC}\n" "$(printf '═%.0s' $(seq 1 $TW))"
-    # 标题行
     printf "  ${CYAN}${BOLD}║${NC} ${BOLD}Claude Code 全家桶 — Mac 一键安装${NC}%*s${CYAN}${BOLD}║${NC}\n" \
-        $((TW - 19 - 1)) ""  # 19 = 中文字符宽度估算
-    # 分隔线
+        $((TW - 19 - 1)) ""
     printf "  ${CYAN}╟%s╢${NC}\n" "$(printf '─%.0s' $(seq 1 $TW))"
-
-    # 工具列表
     printf "  ${CYAN}║${NC} ${DIM}▸ Homebrew  ▸ Node.js  ▸ Claude Code  ▸ CC-Switch  ▸ CloudCLI${NC}%*s${CYAN}║${NC}\n" \
         $((TW - 59)) ""
     printf "  ${CYAN}║${NC}%*s${CYAN}║${NC}\n" "$TW" ""
 
-    # 进度条
     local width=30
     local filled=$(( step * width / (total > 0 ? total : 1) ))
     local empty=$(( width - filled ))
@@ -69,16 +89,11 @@ draw_header() {
         "$bar_filled" "$bar_empty" "$pct" "$step" "$total"
     printf "  ${DIM}%ds${NC}%*s${CYAN}║${NC}\n" "$elapsed" \
         $((TW - 30 - 12 - 10)) ""
-
-    # 当前步骤
     printf "  ${CYAN}║${NC} ${CYAN}→ %s${NC}%*s${CYAN}║${NC}\n" "$label" \
         $((TW - ${#label} - 2)) ""
-
-    # 底边
     printf "  ${CYAN}╚%s╝${NC}\n" "$(printf '═%.0s' $(seq 1 $TW))"
 
-    # 重新限制滚动区域：头部以下
-    tput csr "$HEADER_LINES" "$(term_rows)" 2>/dev/null || true
+    lock_scroll
 }
 
 # ── 滚动日志区 ──
@@ -98,24 +113,6 @@ draw_scroll_area() {
     for ((i = start_idx; i < total_logs; i++)); do
         printf "%s\n" "${SCROLL_LINES[$i]}"
     done
-}
-
-# ── 带重试的下载/安装 ──
-retry() {
-    local max=3 desc="$1"; shift
-    local attempt=1 delay=3
-    while (( attempt <= max )); do
-        if "$@"; then return 0; fi
-        local rc=$?
-        warn "[${attempt}/${max}] ${desc} 失败 (exit=${rc})"
-        if (( attempt < max )); then
-            info "等待 ${delay} 秒后重试..."
-            sleep "$delay"
-            delay=$((delay * 2))
-        fi
-        attempt=$((attempt + 1))
-    done
-    return 1
 }
 
 # ── Shell 配置 ──
@@ -138,12 +135,11 @@ if [[ "$(uname)" != "Darwin" ]]; then
     echo "仅支持 macOS" && exit 1
 fi
 
-trap 'tput csr 0 $(term_rows) 2>/dev/null; show_cursor; exit 1' INT TERM
-trap 'tput csr 0 $(term_rows) 2>/dev/null; show_cursor' EXIT
+trap 'release_scroll; show_cursor; exit 1' INT TERM
+trap 'release_scroll; show_cursor' EXIT
 
 hide_cursor; printf '\033[2J\033[H'
-tput csr "$HEADER_LINES" "$(term_rows)" 2>/dev/null || true
-
+lock_scroll
 draw_header 0 "$TOTAL_STEPS" "初始化..."
 draw_scroll_area
 PROFILE=$(detect_profile)
@@ -169,21 +165,22 @@ draw_scroll_area
 if command -v brew &>/dev/null; then
     log "Homebrew 已安装 — $(brew --version | head -1)"
 else
-    # Homebrew 安装脚本需要 NONINTERACTIVE，但进度条仍会显示
     info "安装 Homebrew（下方可见 git clone 进度）..."
+    release_scroll
     set +e
     NONINTERACTIVE=1 /bin/bash -c \
         "$(curl -fsSL --retry 3 --retry-delay 5 https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
-        </dev/null 2>&1
+        </dev/tty 2>&1
     local brew_rc=$?
     set -e
+    lock_scroll
 
     if (( brew_rc == 0 )) && command -v brew &>/dev/null; then
         log "Homebrew 安装完成"
     else
         err "Homebrew 安装失败 (exit=${brew_rc})"
         err "常见原因: 网络不通、DNS 污染。请检查能否访问 github.com"
-        err "也可手动安装后重新运行本脚本:"
+        err "也可手动安装:"
         err "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
         show_cursor; exit 1
     fi
@@ -218,9 +215,7 @@ elif [[ "$(node -v | cut -d. -f1 | tr -d 'v')" -lt 18 ]]; then
 fi
 
 if $NEED_NODE; then
-    # 不重定向，让 brew 的原生进度条直接显示
-    # brew 输出直接到终端（保留原生进度条）
-    if brew install node; then
+    if run_cmd "安装 Node.js" brew install node; then
         log "Node.js $(node -v) + npm $(npm -v) 安装完成"
     else
         err "Node.js 安装失败"; show_cursor; exit 1
@@ -248,31 +243,32 @@ if command -v claude &>/dev/null; then
     log "Claude Code 已安装 — $(claude --version 2>/dev/null || echo ok)"
 else
     TMP_INSTALL="/tmp/claude-install-$$.sh"
-    info "下载 Claude Code 安装脚本（下方可见 curl 进度条）..."
 
     set +e
-    # curl -# 进度条走 stderr，不重定向以保留原生进度动画
-    curl -# --retry 3 --retry-delay 5 -fSL \
-        "https://claude.ai/install.sh" -o "$TMP_INSTALL"
+    run_cmd "下载 Claude Code 安装脚本" \
+        curl -# --retry 3 --retry-delay 5 -fSL \
+            "https://claude.ai/install.sh" -o "$TMP_INSTALL"
     local curl_rc=$?
     set -e
 
     if (( curl_rc != 0 )) || [[ ! -s "$TMP_INSTALL" ]]; then
         warn "官方脚本下载失败，切换 Homebrew cask..."
-        if retry "Claude Code (brew)" brew install --cask claude-code@latest; then
+        if run_cmd "安装 Claude Code (brew)" brew install --cask claude-code@latest; then
             log "Claude Code (brew) 安装完成"
         else
             err "Claude Code 安装失败"; show_cursor; exit 1
         fi
     else
-        info "执行安装..."
-        set +e; bash "$TMP_INSTALL"; local install_rc=$?; set -e
+        set +e
+        run_cmd "执行 Claude Code 安装脚本" bash "$TMP_INSTALL"
+        local install_rc=$?
+        set -e
         rm -f "$TMP_INSTALL"
         if (( install_rc == 0 )) && command -v claude &>/dev/null; then
             log "Claude Code 安装完成"
         else
             warn "官方脚本失败，切换 Homebrew cask..."
-            retry "Claude Code (brew)" brew install --cask claude-code@latest && \
+            run_cmd "安装 Claude Code (brew)" brew install --cask claude-code@latest && \
                 log "Claude Code (brew) 安装完成" || \
                 { err "Claude Code 安装失败"; show_cursor; exit 1; }
         fi
@@ -289,7 +285,7 @@ if [[ -d "/Applications/CC-Switch.app" ]]; then
     log "CC-Switch 已安装"
 else
     brew tap farion1231/ccswitch 2>> "$LOG_FILE" || true
-    if retry "CC-Switch" brew install --cask cc-switch; then
+    if run_cmd "安装 CC-Switch" brew install --cask cc-switch; then
         [[ -d "/Applications/CC-Switch.app" ]] && \
             log "CC-Switch → /Applications/CC-Switch.app" || \
             warn "安装完成但未找到 .app，请检查"
@@ -326,8 +322,7 @@ draw_scroll_area
 log "sudo 权限已释放"
 hash -r 2>/dev/null || true
 
-# 恢复全屏滚动
-tput csr 0 "$(term_rows)" 2>/dev/null || true
+release_scroll
 show_cursor
 printf '\033[2J\033[H'
 
