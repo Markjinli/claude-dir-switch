@@ -27,9 +27,31 @@ echo -e "${CYAN}============================================================${NC
 echo -e "${CYAN}   Claude Code 全家桶 — Mac 一键安装${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
+echo -e "  本脚本将安装以下工具:"
+echo "    • Homebrew      — macOS 包管理器"
+echo "    • Claude Code   — AI 编程助手"
+echo "    • CC-Switch     — 模型切换 & MCP 管理"
+echo "    • CloudCLI      — 网页版 Claude Code 图形界面"
+echo ""
+echo -e "  ${YELLOW}安装过程中需要写入 /Applications 等系统目录，${NC}"
+echo -e "  ${YELLOW}请在下方输入你的开机密码以授权。${NC}"
+echo ""
+
+# ── Step 0: 提前获取 sudo 权限，避免安装中途被打断 ──
+echo -e "${YELLOW}── Step 0/5: 获取系统权限 ──${NC}"
+if sudo -v; then
+    log "密码验证成功，权限已缓存"
+    # 后台持续刷新 sudo 时间戳，防止长时间安装时权限过期
+    while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || break; done 2>/dev/null &
+    SUDO_KEEPER_PID=$!
+else
+    err "密码验证失败，无法继续。请重新运行脚本。"
+    exit 1
+fi
+echo ""
 
 # ── Step 1: 安装 Homebrew ──
-echo -e "${YELLOW}── Step 1/4: 检查 Homebrew ──${NC}"
+echo -e "${YELLOW}── Step 1/5: 检查 Homebrew ──${NC}"
 if command -v brew &>/dev/null; then
     log "Homebrew 已安装 — $(brew --version | head -1)"
 else
@@ -44,7 +66,7 @@ fi
 echo ""
 
 # ── Step 2: 安装 Claude Code ──
-echo -e "${YELLOW}── Step 2/4: 安装 Claude Code ──${NC}"
+echo -e "${YELLOW}── Step 2/5: 安装 Claude Code ──${NC}"
 if command -v claude &>/dev/null; then
     log "Claude Code 已安装 — v$(claude --version 2>/dev/null || echo '?')"
 else
@@ -72,7 +94,7 @@ fi
 echo ""
 
 # ── Step 3: 安装 CC-Switch ──
-echo -e "${YELLOW}── Step 3/4: 安装 CC-Switch ──${NC}"
+echo -e "${YELLOW}── Step 3/5: 安装 CC-Switch ──${NC}"
 if [[ -d "/Applications/CC-Switch.app" ]]; then
     log "CC-Switch 已安装"
 else
@@ -84,7 +106,7 @@ fi
 echo ""
 
 # ── Step 4: 安装 Claude Code UI (CloudCLI) ──
-echo -e "${YELLOW}── Step 4/4: 安装 Claude Code UI (CloudCLI) ──${NC}"
+echo -e "${YELLOW}── Step 4/5: 安装 Claude Code UI (CloudCLI) ──${NC}"
 info "通过 npx 运行 CloudCLI（首次会自动下载）..."
 
 # 创建快捷启动脚本
@@ -98,6 +120,14 @@ npx @cloudcli-ai/cloudcli "$@"
 LAUNCHEREOF
 chmod +x "$LAUNCHER"
 log "CloudCLI 启动脚本已创建: $LAUNCHER"
+echo ""
+
+# ── Step 5: 清理 ──
+echo -e "${YELLOW}── Step 5/5: 清理 ──${NC}"
+if [[ -n "${SUDO_KEEPER_PID:-}" ]]; then
+    kill "$SUDO_KEEPER_PID" 2>/dev/null || true
+fi
+log "sudo 权限缓存已释放"
 echo ""
 
 # ── 完成 ──
